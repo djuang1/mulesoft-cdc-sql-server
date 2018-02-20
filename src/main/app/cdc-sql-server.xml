@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:objectstore="http://www.mulesoft.org/schema/mule/objectstore"
+	xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking" xmlns:json="http://www.mulesoft.org/schema/mule/json" xmlns:db="http://www.mulesoft.org/schema/mule/db" xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:spring="http://www.springframework.org/schema/beans" 
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/objectstore http://www.mulesoft.org/schema/mule/objectstore/current/mule-objectstore.xsd
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/json http://www.mulesoft.org/schema/mule/json/current/mule-json.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd">
+    <http:listener-config name="HTTP_Listener_Configuration" host="0.0.0.0" port="8081" doc:name="HTTP Listener Configuration"/>
+    <db:generic-config name="Generic_Database_Configuration" url="jdbc:sqlserver://${db.host}:${db.port};databaseName=${db.database};user=${db.user};password=${db.password};TRUSTED_CONNECTION=true" driverClassName="com.microsoft.sqlserver.jdbc.SQLServerDriver" doc:name="Generic Database Configuration"/>
+    
+    <spring:beans>
+        <spring:bean id="myListableObjectStore" class="org.mule.util.store.SimpleMemoryObjectStore"/>
+    </spring:beans>
+    
+    <objectstore:config name="ObjectStore__Configuration" doc:name="ObjectStore: Configuration" objectStore-ref="myListableObjectStore" persistent="true"/>
+    
+    <flow name="cdc-sql-serverFlow1" processingStrategy="synchronous">
+        <poll doc:name="Poll">
+            <fixed-frequency-scheduler frequency="30" timeUnit="SECONDS"/>
+            <watermark variable="timestamp" default-expression="#[server.dateTime.format(&quot;yyyy-MM-dd&quot;)]" object-store-ref="myListableObjectStore"/>
+            <db:select config-ref="Generic_Database_Configuration" doc:name="Database">
+                    <db:dynamic-query><![CDATA[SELECT sys.fn_cdc_map_lsn_to_time(__$start_lsn) as LastModifiedDate,* 
+FROM cdc.fn_cdc_get_all_changes_dbo_records (sys.fn_cdc_get_min_lsn('dbo_records'), sys.fn_cdc_get_max_lsn(), N'all') 
+WHERE sys.fn_cdc_map_lsn_to_time(__$start_lsn) > convert(datetime,'#[flowVars['timestamp']]')
+ORDER BY LastModifiedDate DESC;]]></db:dynamic-query>
+                </db:select>
+        </poll>
+        <logger message="#[payload]" level="INFO" doc:name="Logger"/>
+        <choice doc:name="Choice">
+            <when expression="#[payload != []]">
+                <set-variable variableName="timestamp" value="#[payload[0].LastModifiedDate]" doc:name="Variable"/>
+                <logger message="New Timestamp #[flowVars.timestamp]" level="INFO" doc:name="Logger"/>
+            </when>
+            <otherwise>
+                <logger message="#[flowVars.timestamp] - No Updates" level="INFO" doc:name="Logger"/>
+            </otherwise>
+        </choice>
+    </flow>
+    <flow name="clearWatermark">
+        <http:listener config-ref="HTTP_Listener_Configuration" path="/clearwatermark" doc:name="HTTP"/>
+        <objectstore:retrieve-and-store config-ref="ObjectStore__Configuration" key="timestamp" defaultValue-ref="#[server.dateTime.format(&quot;yyyy-MM-dd&quot;)]" storeValue-ref="#[server.dateTime.format(&quot;yyyy-MM-dd&quot;)]" doc:name="ObjectStore"/>
+        <object-to-string-transformer doc:name="Object to String"/>
+    </flow>
+</mule>
